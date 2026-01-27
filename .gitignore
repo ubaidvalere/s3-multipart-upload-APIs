@@ -1,0 +1,32 @@
+# Dependencies
+/node_modules
+/npm-debug.log*
+yarn-error.log*
+yarn.lock
+
+# Environment variables
+.env
+.env.development
+.env.production
+
+# Build artifacts and logs
+/build
+/dist
+*.log
+*.pid
+*.seed
+*.gz
+*.out
+
+# Testing and coverage
+/coverage
+/.nyc_output
+
+# Editor/OS specific files (optional)
+.DS_Store # Mac
+Thumbs.db # Windows
+.vscode/ # VS Code specific settings
+
+# Optional: if you use Next.js, Nuxt.js, etc.
+# /.next
+# /.nuxt
