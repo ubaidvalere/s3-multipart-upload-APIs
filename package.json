@@ -6,7 +6,7 @@
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1",
     "dev": "tsx watch src/index.js",
-    "build": "npm install && tsx src/index.js",
+    "build": "npm install",
     "start": "tsx src/index.js"
   },
   "keywords": [],
