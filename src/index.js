@@ -9,6 +9,8 @@ import {
   UploadPartCommand,
   CompleteMultipartUploadCommand,
   AbortMultipartUploadCommand,
+  ListMultipartUploadsCommand,
+  ListPartsCommand,
 } from "@aws-sdk/client-s3";
 import { getSignedUrl } from "@aws-sdk/s3-request-presigner";
 import dotenv from "dotenv";
@@ -16,7 +18,8 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "50mb" }));
+app.use(express.urlencoded({ limit: "50mb", extended: true }));
 
 // Configure AWS S3 client
 const s3Client = new S3Client({
@@ -27,7 +30,7 @@ const s3Client = new S3Client({
   },
 });
 
-const BUCKET_NAME = process.env.S3_BUCKET_NAME || "your-bucket-name";
+const BUCKET_NAME = process.env.S3_BUCKET_NAME;
 
 app.get("/", (req, res) => {
   return res.status(200).json({
@@ -62,7 +65,7 @@ app.post("/api/multipart-init", async (req, res) => {
 
     // Generate a unique S3 key (file path in bucket)
     const fileKey = `uploads/${Date.now()}-${fileName}`;
-
+    console.log("bucket name", BUCKET_NAME);
     // Create multipart upload in S3
     const createCommand = new CreateMultipartUploadCommand({
       Bucket: BUCKET_NAME,
@@ -142,7 +145,11 @@ app.post("/api/multipart-resume", async (req, res) => {
     const { uploadId, chunkNumbers } = req.body;
 
     // Validate input
-    if (!uploadId || !Array.isArray(chunkNumbers) || chunkNumbers.length === 0) {
+    if (
+      !uploadId ||
+      !Array.isArray(chunkNumbers) ||
+      chunkNumbers.length === 0
+    ) {
       return res.status(400).json({ error: "Invalid parameters" });
     }
 
@@ -193,7 +200,7 @@ app.post("/api/multipart-resume", async (req, res) => {
  */
 app.post("/api/multipart-complete", async (req, res) => {
   try {
-    const { uploadId, parts } = req.body;
+    const { uploadId, parts, fileKey } = req.body;
 
     // Validate input
     if (!uploadId || !Array.isArray(parts) || parts.length === 0) {
@@ -206,8 +213,6 @@ app.post("/api/multipart-complete", async (req, res) => {
     //   return res.status(404).json({ error: 'Upload not found' });
     // }
 
-    const fileKey = req.body.fileKey; // Get from your DB in production
-
     // Sort parts by part number (S3 requires this)
     const sortedParts = parts
       .map((p) => ({
@@ -215,6 +220,8 @@ app.post("/api/multipart-complete", async (req, res) => {
         ETag: p.ETag,
       }))
       .sort((a, b) => a.PartNumber - b.PartNumber);
+
+    console.log("sortedParts", sortedParts);
 
     // Complete the multipart upload in S3
     const completeCommand = new CompleteMultipartUploadCommand({
@@ -288,27 +295,68 @@ app.post("/api/multipart-abort", async (req, res) => {
 });
 
 /**
+ * Get all pending uploads
+ *
+ * Endpoint to check all pending multipart uploads in S3.
+ * Returns an array of all upload IDs that are currently in progress.
+ */
+app.get("/api/pending-uploads", async (req, res) => {
+  try {
+    // List all in-progress multipart uploads from S3
+    const listCommand = new ListMultipartUploadsCommand({
+      Bucket: BUCKET_NAME,
+    });
+
+    const result = await s3Client.send(listCommand);
+
+    // Extract upload IDs from the result
+    const uploadIds = (result.Uploads || []).map((upload) => upload.UploadId);
+
+    res.json({
+      uploadIds,
+      count: uploadIds.length,
+    });
+  } catch (error) {
+    console.error("Error fetching pending uploads:", error);
+    res.status(500).json({ error: "Failed to fetch pending uploads" });
+  }
+});
+
+/**
  * OPTIONAL: Get upload status
  *
  * Endpoint to check the status of an upload.
  * Useful for showing upload history or debugging.
  */
-app.get("/api/upload-status/:uploadId", async (req, res) => {
+app.get("/api/upload-status", async (req, res) => {
   try {
-    const { uploadId } = req.params;
-
+    const { uploadId, fileKey } = req.query;
+    console.log("uploadId", uploadId);
+    console.log("fileKey", fileKey);
     // Retrieve from your database
     // const upload = await db.uploads.findOne({ uploadId });
+
+    const command = new ListPartsCommand({
+      Bucket: BUCKET_NAME,
+      Key: fileKey,
+      UploadId: uploadId,
+    });
+
+    const result = await s3Client.send(command);
 
     // For this example, return mock data
     res.json({
       uploadId,
-      status: "in_progress",
+      status: result.Parts?.length > 0 ? "in_progress" : "completed",
+      parts: result.Parts?.length,
+      storage: result.StorageClass,
       // Include other relevant info from your DB
     });
   } catch (error) {
     console.error("Error fetching upload status:", error);
-    res.status(500).json({ error: "Failed to fetch upload status" });
+    res
+      .status(500)
+      .json({ error: "Failed to fetch upload status", message: error.message });
   }
 });
 
@@ -316,42 +364,6 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Upload API server running on port ${PORT}`);
 });
-
-// ============================================================
-// Database Schema Example (for reference)
-// ============================================================
-
-/*
--- PostgreSQL schema example for tracking uploads
-
-CREATE TABLE uploads (
-  id SERIAL PRIMARY KEY,
-  upload_id VARCHAR(255) UNIQUE NOT NULL,
-  file_key VARCHAR(500) NOT NULL,
-  file_name VARCHAR(255) NOT NULL,
-  file_size BIGINT,
-  total_parts INTEGER NOT NULL,
-  status VARCHAR(50) NOT NULL DEFAULT 'in_progress',
-  s3_location VARCHAR(500),
-  created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  completed_at TIMESTAMP,
-  user_id INTEGER REFERENCES users(id)
-);
-
-CREATE INDEX idx_upload_id ON uploads(upload_id);
-CREATE INDEX idx_user_id ON uploads(user_id);
-CREATE INDEX idx_status ON uploads(status);
-
--- Track individual part uploads (optional, for detailed monitoring)
-CREATE TABLE upload_parts (
-  id SERIAL PRIMARY KEY,
-  upload_id VARCHAR(255) REFERENCES uploads(upload_id),
-  part_number INTEGER NOT NULL,
-  etag VARCHAR(255),
-  uploaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-  UNIQUE(upload_id, part_number)
-);
-*/
 
 // ============================================================
 // Environment Variables (.env file)
